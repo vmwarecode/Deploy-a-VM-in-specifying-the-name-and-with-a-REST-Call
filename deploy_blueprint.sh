@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copyright 2017, bdereims@vmware.com 
+# Copyright 2017, bdereims@vmware.com
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#Must install jq: https://github.com/stedolan/jq/releases/download/jq-1.5/jq-linux64 
+#usage: destroy_vm.sh <name-of-vm>
 
 export REFRESHRATE=20
 export USERNAME=<username@tenant.local in vRA, ex. administrator@vsphere.local>
@@ -32,50 +34,25 @@ AUTH=$(echo $TOKEN | sed -e 's/^.*id":"//' -e 's/".*$//')
 AUTH="Bearer $AUTH"
 
 #Query Blueprint ID
-BPID=$(curl -s --insecure -H "Accept:text/json" -H "Authorization: $AUTH" https://$VRA/catalog-service/api/consumer/entitledCatalogItemViews?%24filter=name+eq+%27${BLUEPRINT}%27 | python -m json.tool | grep "catalogItemId" | sed -e 's/.*": "//' -e 's/".*$//')
+BPID=$(curl -s --insecure -H "Accept:text/json" -H "Authorization: $AUTH" https://$VRA/catalog-service/api/consumer/resources?%24filter=name+eq+%27${1}%27 | python -m json.tool | jq '. | .["content"] | .[0] | {name: .name, parentResourceRef: .parentResourceRef.id} | {parentResourceRef}' | head -2 | tail -1  | sed -e 's/.*": "//' -e 's/".*$//')
 
-#Create JSON template
-curl -s --insecure -H "application/json" -H "Authorization: $AUTH" \
-https://$VRA/catalog-service/api/consumer/entitledCatalogItems/$BPID/requests/template \
-| python -m json.tool > $BPJSON
-
-#Do the request
-REQUESTID=$(curl -s --insecure -H "Accept:application/json" -H "Authorization: $AUTH" --data @$BPJSON -H "Content-Type:application/json" https://$VRA/catalog-service/api/consumer/entitledCatalogItems/$BPID/requests | python -m json.tool | grep "id" | sed -e 's/.*": "//' -e 's/".*$//')
-
-START=$(date +%s.%N)
-
-#Wait until VM is sucessfully deployed
-
-#String -> Array
-ID=(${REQUESTID// / })
-
-echo "Refresh Rate: ${REFRESHRATE}s"
-while true; do
-	STATUS=$(curl -s --insecure -H "application/json" -H "Authorization: $AUTH" https://$VRA/catalog-service/api/consumer/requests/${ID[2]} | python -m json.tool | grep "stateName" | sed -e 's/.*": "//' -e 's/".*$//')
-	if [ "$STATUS" == "Successful" ] || [ "$STATUS" == "Failed" ]
-	then
-		break
-	fi
-	END=$(date +%s.%N)
-	DIFF=$(echo "$END - $START" | bc)
-	echo -en "\rDuration: ${DIFF}s - Current status: $STATUS"
-	sleep $REFRESHRATE 
-done
-
-#Deployment is done
-if [ "$STATUS" == "Successful" ]
+#Does the VM exist?
+if [ "${BPID}" == "  " ]
 then
-	echo -e "\nDeployment complete in ${DIFF}s"
-
-	#Get Name and IP
-	curl -s --insecure -H "application/json" -H "Authorization: $AUTH" https://$VRA/catalog-service/api/consumer/requests/${ID[2]}/resourceViews | python -m json.tool > ${BPJSON}-result
-	echo -e "\nHostname:" ; cat ${BPJSON}-result | grep "MachineName" | sed -e 's/.*": "//' -e 's/".*$//'
-	echo -e "\nIP Address:" ; cat ${BPJSON}-result | grep "ip_address" | sed -e 's/.*": "//' -e 's/".*$//'
-else
-	echo -e "\nDeployment failed after ${DIFF}s"
+        echo "VM ${1} not found!"
+        exit 1 
 fi
 
+#Query Destroy Action ID for the Parent Blueprint
+DESTROYID=$(curl -s --insecure -H "Accept:text/json" -H "Authorization: $AUTH" https://$VRA/catalog-service/api/consumer/resources/${BPID}/actions | python -m json.tool | jq '.content[] | {name: .name, id: .id} | select(.name == "Destroy") | .id' | sed -e 's/"//g')
+
+#Request JSON Template for Destroying
+curl -s --insecure -H "application/json" -H "Authorization: $AUTH" \
+https://$VRA/catalog-service/api/consumer/resources/${BPID}/actions/${DESTROYID}/requests/template \
+| python -m json.tool > $BPJSON
+
+#Request the Destroy action
+curl -s --insecure -H "Accept:application/json" -H "Authorization: $AUTH" --data @$BPJSON -H "Content-Type:application/json" https://$VRA/catalog-service/api/consumer/resources/${BPID}/actions/${DESTROYID}/requests
 
 #CleanUp
 rm $BPJSON
-rm $BPJSON-result
